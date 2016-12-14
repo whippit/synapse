@@ -3,12 +3,11 @@ import os
 import sys
 import tempfile
 
+import synapse.lib.cli as s_cli
 import synapse.tools.dmon as s_dmon
 
 from synapse.tests.common import SynTest
 from synapse.tools.dmon import getArgParser
-
-import synapse.lib.cli as s_cli
 
 class TestArgParser(SynTest):
 
@@ -62,4 +61,3 @@ class TestMain(SynTest):
 
         s_dmon.main(['--onboot', tfile.name])
         tfile.close()
-
