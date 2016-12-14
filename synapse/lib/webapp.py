@@ -6,6 +6,7 @@ import argparse
 import tornado
 import tornado.web
 import tornado.ioloop
+import tornado.websocket
 import tornado.httpserver
 
 import synapse.async as s_async
@@ -87,6 +88,37 @@ class BaseHand(tornado.web.RequestHandler):
         self.write(retinfo)
         self.finish()
 
+class BaseWebSock(tornado.websocket.WebSocketHandler):
+    def initialize(self, **globs):
+        print('init called')
+        self.globs = globs
+
+        self.rxbus = EventBus()
+        self.txbus = EventBus()
+
+        self.application.link(self.txbus.dist)
+        self.txbus.link(self._send_message)
+
+    def _send_message(self, evt):
+        print('srv:evt', evt)
+        self.write_message(msgenpack(evt), binary=True)
+
+    def check_origin(self, origin):
+        # FIXME
+        return True
+
+    def open(self):
+        print("srv:ws opened")
+        # FIXME session stuffz...
+
+    def on_message(self, message):
+        message = msgunpack(message)
+        print('srv:ws message: %r' % (message,))
+        # FIXME validate structure?
+        self.rxbus.put(message)
+
+    def on_close(self):
+        print("srv:ws closed")
 
 class CrudHand(BaseHand):
     '''
