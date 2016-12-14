@@ -1,6 +1,8 @@
 
 import json
 
+import tornado.websocket as t_websock
+
 from tornado.httpclient import HTTPError
 from tornado.testing import gen_test, AsyncTestCase, AsyncHTTPClient
 
@@ -30,18 +32,42 @@ class TestCrudHand(AsyncTestCase, SynTest):
     def setUp(self):
         SynTest.setUp(self)
         AsyncTestCase.setUp(self)
-        core = synapse.cortex.openurl('ram://')
+        self.core = synapse.cortex.openurl('ram://')
         self.wapp = s_webapp.WebApp()
         self.wapp.listen(0, host='127.0.0.1')
         self.host = 'http://127.0.0.1:%d' % (self.wapp.getServBinds()[0][1])
-        for model_name in ['foo', 'bar']:
-            self.wapp.addHandPath('/v1/(%s)' % (model_name), s_webapp.CrudHand, core=core)
-            self.wapp.addHandPath('/v1/(%s)/([^/]+)' % (model_name), s_webapp.CrudHand, core=core)
+
+        #for model_name in ['foo', 'bar']:
+        #    self.wapp.addHandPath('/v1/(%s)' % (model_name), s_webapp.CrudHand, core=self.core)
+        #    self.wapp.addHandPath('/v1/(%s)/([^/]+)' % (model_name), s_webapp.CrudHand, core=self.core)
 
     def tearDown(self):
         self.wapp.fini()
         AsyncTestCase.tearDown(self)
         SynTest.tearDown(self)
+
+    @gen_test
+    def test_wsock(self):
+
+        self.thisHostMustNot(platform='windows')
+
+        regex = r'/v1/ws'
+        self.wapp.addHandPath(regex, s_webapp.BaseWebSock, core=self.core)
+
+        url = '%s%s' % (self.host.replace('http:', 'ws:'), regex)
+        print('URL:%r' % (url,))
+
+        conn = yield t_websock.websocket_connect(url, io_loop=self.io_loop)
+        self.wapp.fire('woot', x=3, y=4)
+
+        print('waiting for msg') 
+        msg = yield conn.read_message()
+        msg = msgunpack(msg)
+        print('msg: %r' % (msg,))
+        self.assertEqual(msg[0], 'woot')
+        self.assertEqual(msg[1]['x'], 3)
+        self.assertEqual(msg[1]['y'], 4)
+        # Do something with msg
 
     @gen_test
     def test_invalid_model(self):
@@ -151,7 +177,6 @@ class TestCrudHand(AsyncTestCase, SynTest):
         resp = json.loads(resp.body.decode('utf-8'))
         self.assertEqual(resp['status'], 'ok')
         self.assertEqual(resp['ret'], [])
-
 
 class WebAppTest(AsyncTestCase, SynTest):
 
