@@ -19,11 +19,16 @@ class NoSuchProp(SynErr):pass
 class NoSuchOper(SynErr):pass
 class NoSuchRule(SynErr):pass
 
+class BadOperArg(SynErr):pass
 class BadTypeValu(SynErr):pass
 class DupTypeName(SynErr):pass
 class DupPropName(SynErr):pass
 class BadPropName(SynErr):pass
 class BadMesgVers(SynErr):pass
+class BadInfoValu(SynErr):pass
+class BadStorValu(SynErr):pass
+
+class WebAppErr(SynErr):pass
 
 class SyntaxError(SynErr):pass
 
@@ -63,7 +68,11 @@ class SidNotFound(Exception):pass
 class PropNotFound(Exception):pass
 
 class HitMaxTime(Exception):pass
+class HitMaxLimit(Exception):pass
 class HitMaxRetry(Exception):pass
+
+class NotEnoughFree(Exception):pass
+class NoWritableAxons(Exception):pass
 
 class MustNotWait(Exception):pass   # blocking function called by no-wait thread
 

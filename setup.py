@@ -16,7 +16,7 @@ from setuptools import setup,find_packages
 
 setup(
     name='synapse',
-    version='0.0.7', # sync with synapse.version!
+    version='0.0.9', # sync with synapse.version!
     description='Synapse Distributed Computing Framework',
     author='Invisigoth Kenshoto',
     author_email='invisigoth.kenshoto@gmail.com',
@@ -29,6 +29,7 @@ setup(
         'requests',
         'tornado>=3.2',
         'cryptography>=1.1.2',
+        'pyOpenSSL>=16.2.0',
         'msgpack-python>=0.4.2',
     ],
 

@@ -1,148 +1,19 @@
 from __future__ import absolute_import,unicode_literals
 
-import time
+import re
 import sqlite3
 
 import synapse.compat as s_compat
 import synapse.cores.common as common
 
 from synapse.compat import queue
+from synapse.common import millinow
+
+stashre = re.compile('{{([A-Z]+)}}')
 
 int_t = s_compat.typeof(0)
 str_t = s_compat.typeof('visi')
 none_t = s_compat.typeof(None)
-
-istable = '''
-    SELECT
-        name
-    FROM
-        sqlite_master
-    WHERE
-        type='table'
-    AND
-        name=?
-'''
-
-inittable = '''
-CREATE TABLE %s (
-    id VARCHAR,
-    prop VARCHAR,
-    strval TEXT,
-    intval BIGINT,
-    stamp BIGINT
-);
-'''
-
-init_id_idx = 'CREATE INDEX %s_id_idx ON %s (id,prop)'
-init_strval_idx = 'CREATE INDEX %s_prop_time_idx ON %s (prop,stamp)'
-init_strval_idx = 'CREATE INDEX %s_strval_idx ON %s (prop,strval,stamp)'
-init_intval_idx = 'CREATE INDEX %s_intval_idx ON %s (prop,intval,stamp)'
-
-addrows = 'INSERT INTO %s (id,prop,strval,intval,stamp) VALUES (?,?,?,?,?)'
-getrows_by_id = 'SELECT * FROM %s WHERE id=?'
-getrows_by_range = 'SELECT * FROM %s WHERE prop=? and intval >= ? AND intval < ? LIMIT ?'
-getrows_by_le = 'SELECT * FROM %s WHERE prop=? and intval <= ? LIMIT ?'
-getrows_by_ge = 'SELECT * FROM %s WHERE prop=? and intval >= ? LIMIT ?'
-getrows_by_id_prop = 'SELECT * FROM %s WHERE id=? AND prop=?'
-
-################################################################################
-getrows_by_prop = 'SELECT * FROM %s WHERE prop=? LIMIT ?'
-getrows_by_prop_int = 'SELECT * FROM %s WHERE prop=? AND intval=? LIMIT ?'
-getrows_by_prop_str = 'SELECT * FROM %s WHERE prop=? AND strval=? LIMIT ?'
-
-getrows_by_prop_wmin = 'SELECT * FROM %s WHERE prop=? AND stamp >=? LIMIT ?'
-getrows_by_prop_int_wmin = 'SELECT * FROM %s WHERE prop=? AND intval=? AND stamp >=? LIMIT ?'
-getrows_by_prop_str_wmin = 'SELECT * FROM %s WHERE prop=? AND strval=? AND stamp >=? LIMIT ?'
-
-getrows_by_prop_wmax = 'SELECT * FROM %s WHERE prop=? AND stamp<? LIMIT ?'
-getrows_by_prop_int_wmax = 'SELECT * FROM %s WHERE prop=? AND intval=? AND stamp<? LIMIT ?'
-getrows_by_prop_str_wmax = 'SELECT * FROM %s WHERE prop=? AND strval=? AND stamp<? LIMIT ?'
-
-getrows_by_prop_wminmax = 'SELECT * FROM %s WHERE prop=? AND stamp>=? AND stamp<? LIMIT ?'
-getrows_by_prop_int_wminmax = 'SELECT * FROM %s WHERE prop=? AND intval=? AND stamp>=? AND stamp<? LIMIT ?'
-getrows_by_prop_str_wminmax = 'SELECT * FROM %s WHERE prop=? AND strval=? AND stamp>=? AND stamp<? LIMIT ?'
-################################################################################
-getsize_by_prop = 'SELECT COUNT(*) FROM %s WHERE prop=? LIMIT ?'
-getsize_by_prop_int = 'SELECT COUNT(*) FROM %s WHERE prop=? AND intval=? LIMIT ?'
-getsize_by_prop_str = 'SELECT COUNT(*) FROM %s WHERE prop=? AND strval=? LIMIT ?'
-
-getsize_by_prop_wmin = 'SELECT COUNT(*) FROM %s WHERE prop=? AND stamp>=? LIMIT ?'
-getsize_by_prop_int_wmin = 'SELECT COUNT(*) FROM %s WHERE prop=? AND intval=? AND stamp>=? LIMIT ?'
-getsize_by_prop_str_wmin = 'SELECT COUNT(*) FROM %s WHERE prop=? AND strval=? AND stamp>=? LIMIT ?'
-
-getsize_by_prop_wmax = 'SELECT COUNT(*) FROM %s WHERE prop=? AND stamp<? LIMIT ?'
-getsize_by_prop_int_wmax = 'SELECT COUNT(*) FROM %s WHERE prop=? AND intval=? AND stamp<? LIMIT ?'
-getsize_by_prop_str_wmax = 'SELECT COUNT(*) FROM %s WHERE prop=? AND strval=? AND stamp<? LIMIT ?'
-
-getsize_by_prop_wminmax = 'SELECT COUNT(*) FROM %s WHERE prop=? AND stamp>=? AND stamp<? LIMIT ?'
-getsize_by_prop_int_wminmax = 'SELECT COUNT(*) FROM %s WHERE prop=? AND intval=? AND stamp>=? AND stamp<? LIMIT ?'
-getsize_by_prop_str_wminmax = 'SELECT COUNT(*) FROM %s WHERE prop=? AND strval=? AND stamp>=? AND stamp<? LIMIT ?'
-################################################################################
-
-getsize_by_range = 'SELECT COUNT(*) FROM %s WHERE prop=? and intval >= ? AND intval < ? LIMIT ?'
-getsize_by_le = 'SELECT COUNT(*) FROM %s WHERE prop=? and intval <= ? LIMIT ?'
-getsize_by_ge = 'SELECT COUNT(*) FROM %s WHERE prop=? and intval >= ? LIMIT ?'
-
-delrows_by_id = 'DELETE FROM %s WHERE id=?'
-delrows_by_id_prop = 'DELETE FROM %s WHERE id=? AND prop=?'
-
-################################################################################
-delrows_by_prop = 'DELETE FROM %s WHERE prop=?'
-delrows_by_prop_int = 'DELETE FROM %s WHERE prop=? AND intval=?'
-delrows_by_prop_str = 'DELETE FROM %s WHERE prop=? AND strval=?'
-
-delrows_by_prop_wmin = 'DELETE FROM %s WHERE prop=? AND stamp>=?'
-delrows_by_prop_int_wmin = 'DELETE FROM %s WHERE prop=? AND intval=? AND stamp>=?'
-delrows_by_prop_str_wmin = 'DELETE FROM %s WHERE prop=? AND strval=? AND stamp>=?'
-
-delrows_by_prop_wmax = 'DELETE FROM %s WHERE prop=? AND stamp<?'
-delrows_by_prop_int_wmax = 'DELETE FROM %s WHERE prop=? AND intval=? AND stamp<?'
-delrows_by_prop_str_wmax = 'DELETE FROM %s WHERE prop=? AND strval=? AND stamp<?'
-
-delrows_by_prop_wminmax = 'DELETE FROM %s WHERE prop=? AND stamp>=? AND stamp<?'
-delrows_by_prop_int_wminmax = 'DELETE FROM %s WHERE prop=? AND intval=? AND stamp>=? AND stamp<?'
-delrows_by_prop_str_wminmax = 'DELETE FROM %s WHERE prop=? AND strval=? AND stamp>=? AND stamp<?'
-
-################################################################################
-getjoin_by_prop = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? LIMIT ?)'
-getjoin_by_prop_int = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=? LIMIT ?)'
-getjoin_by_prop_str = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=? LIMIT ?)'
-
-getjoin_by_prop_wmin = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND stamp>=? LIMIT ?)'
-getjoin_by_prop_int_wmin = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=? AND stamp>=? LIMIT ?)'
-getjoin_by_prop_str_wmin = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=? AND stamp>=? LIMIT ?)'
-
-getjoin_by_prop_wmax = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND stamp<? LIMIT ?)'
-getjoin_by_prop_int_wmax = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=? AND stamp<? LIMIT ?)'
-getjoin_by_prop_str_wmax = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=? AND stamp<? LIMIT ?)'
-
-getjoin_by_prop_wminmax = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND stamp>=? AND stamp<? LIMIT ?)'
-getjoin_by_prop_int_wminmax = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=? AND stamp>=? AND stamp<? LIMIT ?)'
-getjoin_by_prop_str_wminmax = 'SELECT * from %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=? AND stamp>=? AND stamp<? LIMIT ?)'
-
-getjoin_by_range_int = 'SELECT * FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? and ? <= intval AND intval < ? LIMIT ?)'
-getjoin_by_range_str = 'SELECT * FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? and ? <= strval AND strval < ? LIMIT ?)'
-
-################################################################################
-deljoin_by_prop = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=?)'
-deljoin_by_prop_int = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=?)'
-deljoin_by_prop_str = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=?)'
-
-deljoin_by_prop_wmin = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND stamp>=? )'
-deljoin_by_prop_int_wmin = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=? AND stamp>=? )'
-deljoin_by_prop_str_wmin = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=? AND stamp>=? )'
-
-deljoin_by_prop_wmax = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND stamp<? )'
-deljoin_by_prop_int_wmax = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=? AND stamp<? )'
-deljoin_by_prop_str_wmax = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=? AND stamp<? )'
-
-deljoin_by_prop_wminmax = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND stamp>=? AND stamp <?)'
-deljoin_by_prop_int_wminmax = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND intval=?)'
-deljoin_by_prop_str_wminmax = 'DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE prop=? AND strval=?)'
-################################################################################
-
-uprows_by_id_prop_str = 'UPDATE %s SET strval=? WHERE id=? and prop=?'
-uprows_by_id_prop_int = 'UPDATE %s SET intval=? WHERE id=? and prop=?'
 
 class WithCursor:
 
@@ -200,8 +71,140 @@ class DbPool:
 
 class Cortex(common.Cortex):
 
-    dbvar = '?'
     dblim = -1
+
+    _t_istable = '''
+        SELECT
+            name
+        FROM
+            sqlite_master
+        WHERE
+            type='table'
+        AND
+            name={{NAME}}
+    '''
+
+    _t_inittable = '''
+    CREATE TABLE {{TABLE}} (
+        iden VARCHAR,
+        prop VARCHAR,
+        strval TEXT,
+        intval BIGINT,
+        tstamp BIGINT
+    );
+    '''
+
+    _t_init_iden_idx = 'CREATE INDEX {{TABLE}}_iden_idx ON {{TABLE}} (iden,prop)'
+    _t_init_prop_idx = 'CREATE INDEX {{TABLE}}_prop_time_idx ON {{TABLE}} (prop,tstamp)'
+    _t_init_strval_idx = 'CREATE INDEX {{TABLE}}_strval_idx ON {{TABLE}} (prop,strval,tstamp)'
+    _t_init_intval_idx = 'CREATE INDEX {{TABLE}}_intval_idx ON {{TABLE}} (prop,intval,tstamp)'
+
+    _t_addrows = 'INSERT INTO {{TABLE}} (iden,prop,strval,intval,tstamp) VALUES ({{IDEN}},{{PROP}},{{STRVAL}},{{INTVAL}},{{TSTAMP}})'
+    _t_getrows_by_iden = 'SELECT * FROM {{TABLE}} WHERE iden={{IDEN}}'
+    _t_getrows_by_range = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} and intval >= {{MINVALU}} AND intval < {{MAXVALU}} LIMIT {{LIMIT}}'
+    _t_getrows_by_le = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} and intval <= {{VALU}} LIMIT {{LIMIT}}'
+    _t_getrows_by_ge = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} and intval >= {{VALU}} LIMIT {{LIMIT}}'
+    _t_getrows_by_iden_prop = 'SELECT * FROM {{TABLE}} WHERE iden={{IDEN}} AND prop={{PROP}}'
+
+    ################################################################################
+    _t_getrows_by_prop = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_int = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_str = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} LIMIT {{LIMIT}}'
+
+    _t_getrows_by_prop_wmin = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp >= {{MINTIME}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_int_wmin = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp >= {{MINTIME}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_str_wmin = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp >= {{MINTIME}} LIMIT {{LIMIT}}'
+
+    _t_getrows_by_prop_wmax = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_int_wmax = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_str_wmax = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+
+    _t_getrows_by_prop_wminmax = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_int_wminmax = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp >= {{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getrows_by_prop_str_wminmax = 'SELECT * FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp >= {{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    ################################################################################
+    _t_getsize_by_prop = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_int = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_str = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} LIMIT {{LIMIT}}'
+
+    _t_getsize_by_prop_wmin = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_int_wmin = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_str_wmin = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}} LIMIT {{LIMIT}}'
+
+    _t_getsize_by_prop_wmax = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_int_wmax = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_str_wmax = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+
+    _t_getsize_by_prop_wminmax = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_int_wminmax = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    _t_getsize_by_prop_str_wminmax = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}}'
+    ################################################################################
+
+    _t_getsize_by_range = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} and intval >= {{MINVALU}} AND intval < {{MAXVALU}} LIMIT {{LIMIT}}'
+    _t_getsize_by_le = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} and intval <= {{VALU}} LIMIT {{LIMIT}}'
+    _t_getsize_by_ge = 'SELECT COUNT(*) FROM {{TABLE}} WHERE prop={{PROP}} and intval >= {{VALU}} LIMIT {{LIMIT}}'
+
+    _t_delrows_by_iden = 'DELETE FROM {{TABLE}} WHERE iden={{IDEN}}'
+    _t_delrows_by_iden_prop = 'DELETE FROM {{TABLE}} WHERE iden={{IDEN}} AND prop={{PROP}}'
+
+    ################################################################################
+    _t_delrows_by_prop = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}}'
+    _t_delrows_by_prop_int = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}}'
+    _t_delrows_by_prop_str = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}}'
+
+    _t_delrows_by_prop_wmin = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}}'
+    _t_delrows_by_prop_int_wmin = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}}'
+    _t_delrows_by_prop_str_wmin = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}}'
+
+    _t_delrows_by_prop_wmax = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp<{{MAXTIME}}'
+    _t_delrows_by_prop_int_wmax = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp<{{MAXTIME}}'
+    _t_delrows_by_prop_str_wmax = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp<{{MAXTIME}}'
+
+    _t_delrows_by_prop_wminmax = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}}'
+    _t_delrows_by_prop_int_wminmax = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}}'
+    _t_delrows_by_prop_str_wminmax = 'DELETE FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}}'
+
+    ################################################################################
+    _t_getjoin_by_prop = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_int = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_str = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} LIMIT {{LIMIT}})'
+
+    _t_getjoin_by_prop_wmin = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_int_wmin = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_str_wmin = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}} LIMIT {{LIMIT}})'
+
+    _t_getjoin_by_prop_wmax = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_int_wmax = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_str_wmax = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}})'
+
+    _t_getjoin_by_prop_wminmax = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_int_wminmax = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_prop_str_wminmax = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}} LIMIT {{LIMIT}})'
+
+    _t_getjoin_by_range_int = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} and {{MINVALU}} <= intval AND intval < {{MAXVALU}} LIMIT {{LIMIT}})'
+    _t_getjoin_by_range_str = 'SELECT * FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} and {{MINVALU}} <= strval AND strval < {{MAXVALU}} LIMIT {{LIMIT}})'
+
+    ################################################################################
+    _t_deljoin_by_prop = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}})'
+    _t_deljoin_by_prop_int = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}})'
+    _t_deljoin_by_prop_str = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}})'
+
+    _t_deljoin_by_prop_wmin = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} )'
+    _t_deljoin_by_prop_int_wmin = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}} )'
+    _t_deljoin_by_prop_str_wmin = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}} )'
+
+    _t_deljoin_by_prop_wmax = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp<{{MAXTIME}} )'
+    _t_deljoin_by_prop_int_wmax = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp<{{MAXTIME}} )'
+    _t_deljoin_by_prop_str_wmax = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp<{{MAXTIME}} )'
+
+    _t_deljoin_by_prop_wminmax = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND tstamp>={{MINTIME}} AND tstamp < {{MAXTIME}})'
+    _t_deljoin_by_prop_int_wminmax = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND intval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}})'
+    _t_deljoin_by_prop_str_wminmax = 'DELETE FROM {{TABLE}} WHERE iden IN (SELECT iden FROM {{TABLE}} WHERE prop={{PROP}} AND strval={{VALU}} AND tstamp>={{MINTIME}} AND tstamp<{{MAXTIME}})'
+
+    ################################################################################
+    _t_uprows_by_iden_prop_str = 'UPDATE {{TABLE}} SET strval={{VALU}} WHERE iden={{IDEN}} and prop={{PROP}}'
+    _t_uprows_by_iden_prop_int = 'UPDATE {{TABLE}} SET intval={{VALU}} WHERE iden={{IDEN}} and prop={{PROP}}'
+
 
     def cursor(self):
         return self.dbpool.cursor()
@@ -224,39 +227,37 @@ class Cortex(common.Cortex):
         q = self._q_getrows_by_range
         args = [ prop, valu[0], valu[1], limit ]
 
-        rows = self.select(q,args)
+        rows = self.select(q, prop=prop, minvalu=valu[0], maxvalu=valu[1], limit=limit)
         return self._foldTypeCols(rows)
 
     def _rowsByGe(self, prop, valu, limit=None):
         limit = self._getDbLimit(limit)
         q = self._q_getrows_by_ge
 
-        rows = self.select(q, [ prop, valu, limit ])
+        rows = self.select(q, prop=prop, valu=valu, limit=limit)
         return self._foldTypeCols(rows)
 
     def _rowsByLe(self, prop, valu, limit=None):
         limit = self._getDbLimit(limit)
         q = self._q_getrows_by_le
-        rows = self.select(q, [prop,valu,limit])
+        rows = self.select(q, prop=prop, valu=valu, limit=limit)
         return self._foldTypeCols(rows)
 
     def _sizeByRange(self, prop, valu, limit=None):
         limit = self._getDbLimit(limit)
         q = self._q_getsize_by_range
-        args = [ prop, valu[0], valu[1], limit ]
-        return self.select(q,args)[0][0]
+        return self.select(q,prop=prop,minvalu=valu[0],maxvalu=valu[1],limit=limit)[0][0]
 
     def _sizeByGe(self, prop, valu, limit=None):
         limit = self._getDbLimit(limit)
         q = self._q_getsize_by_ge
-        args = [ prop, valu, limit ]
-        return self.select(q,args)[0][0]
+        return self.select(q,prop=prop,valu=valu,limit=limit)[0][0]
 
     def _sizeByLe(self, prop, valu, limit=None):
         limit = self._getDbLimit(limit)
         q = self._q_getsize_by_le
         args = [ prop, valu, limit ]
-        return self.select(q,args)[0][0]
+        return self.select(q,prop=prop,valu=valu,limit=limit)[0][0]
 
     def _initDbConn(self):
         dbinfo = self._initDbInfo()
@@ -268,6 +269,9 @@ class Cortex(common.Cortex):
 
     def _getTableName(self):
         return 'syncortex'
+
+    def _addVarDecor(self, name):
+        return ':%s' % (name,)
 
     def _initCortex(self):
 
@@ -290,77 +294,82 @@ class Cortex(common.Cortex):
 
         table = self._getTableName()
 
-        self._initCorQueries(table)
+        self._initCorQueries()
+
         if not self._checkForTable( table ):
             self._initCorTable( table )
 
-    def _prepQuery(self, query, table):
+    def _prepQuery(self, query):
         # prep query strings by replacing all %s with table name
         # and all ? with db specific variable token
-        tabtup = (table,) * query.count('%s')
-        query = query % tabtup
-        query = query.replace('?',self.dbvar)
+        table = self._getTableName()
+        query = query.replace('{{TABLE}}',table)
+
+        for name in stashre.findall(query):
+            query = query.replace('{{%s}}' % name, self._addVarDecor(name.lower()))
+
         return query
 
-    def _initCorQueries(self, table):
-        self._q_istable = istable
-        self._q_inittable = self._prepQuery(inittable, table)
-        self._q_init_id_idx = self._prepQuery(init_id_idx, table)
-        self._q_init_strval_idx = self._prepQuery(init_strval_idx, table)
-        self._q_init_intval_idx = self._prepQuery(init_intval_idx, table)
+    def _initCorQueries(self):
+        self._q_istable = self._prepQuery(self._t_istable)
+        self._q_inittable = self._prepQuery(self._t_inittable)
+        self._q_init_iden_idx = self._prepQuery(self._t_init_iden_idx)
+        self._q_init_prop_idx = self._prepQuery(self._t_init_prop_idx)
+        self._q_init_strval_idx = self._prepQuery(self._t_init_strval_idx)
+        self._q_init_intval_idx = self._prepQuery(self._t_init_intval_idx)
 
-        self._q_addrows = self._prepQuery(addrows, table)
-        self._q_getrows_by_id = self._prepQuery(getrows_by_id, table)
-        self._q_getrows_by_range = self._prepQuery(getrows_by_range, table)
-        self._q_getrows_by_ge = self._prepQuery(getrows_by_ge, table)
-        self._q_getrows_by_le = self._prepQuery(getrows_by_le, table)
-        self._q_getrows_by_id_prop = self._prepQuery(getrows_by_id_prop, table)
+        self._q_addrows = self._prepQuery(self._t_addrows)
+        self._q_getrows_by_iden = self._prepQuery(self._t_getrows_by_iden)
+        self._q_getrows_by_range = self._prepQuery(self._t_getrows_by_range)
+        self._q_getrows_by_ge = self._prepQuery(self._t_getrows_by_ge)
+        self._q_getrows_by_le = self._prepQuery(self._t_getrows_by_le)
+        self._q_getrows_by_iden_prop = self._prepQuery(self._t_getrows_by_iden_prop)
 
         ###################################################################################
-        self._q_getrows_by_prop = self._prepQuery(getrows_by_prop, table)
-        self._q_getrows_by_prop_wmin = self._prepQuery(getrows_by_prop_wmin, table)
-        self._q_getrows_by_prop_wmax = self._prepQuery(getrows_by_prop_wmax, table)
-        self._q_getrows_by_prop_wminmax = self._prepQuery(getrows_by_prop_wminmax, table)
+        self._q_getrows_by_prop = self._prepQuery(self._t_getrows_by_prop)
+        self._q_getrows_by_prop_wmin = self._prepQuery(self._t_getrows_by_prop_wmin)
+        self._q_getrows_by_prop_wmax = self._prepQuery(self._t_getrows_by_prop_wmax)
+        self._q_getrows_by_prop_wminmax = self._prepQuery(self._t_getrows_by_prop_wminmax)
         ###################################################################################
-        self._q_getrows_by_prop_int = self._prepQuery(getrows_by_prop_int, table)
-        self._q_getrows_by_prop_int_wmin = self._prepQuery(getrows_by_prop_int_wmin, table)
-        self._q_getrows_by_prop_int_wmax = self._prepQuery(getrows_by_prop_int_wmax, table)
-        self._q_getrows_by_prop_int_wminmax = self._prepQuery(getrows_by_prop_int_wminmax, table)
+        self._q_getrows_by_prop_int = self._prepQuery(self._t_getrows_by_prop_int)
+        self._q_getrows_by_prop_int_wmin = self._prepQuery(self._t_getrows_by_prop_int_wmin)
+        self._q_getrows_by_prop_int_wmax = self._prepQuery(self._t_getrows_by_prop_int_wmax)
+        self._q_getrows_by_prop_int_wminmax = self._prepQuery(self._t_getrows_by_prop_int_wminmax)
         ###################################################################################
-        self._q_getrows_by_prop_str = self._prepQuery(getrows_by_prop_str, table)
-        self._q_getrows_by_prop_str_wmin = self._prepQuery(getrows_by_prop_str_wmin, table)
-        self._q_getrows_by_prop_str_wmax = self._prepQuery(getrows_by_prop_str_wmax, table)
-        self._q_getrows_by_prop_str_wminmax = self._prepQuery(getrows_by_prop_str_wminmax, table)
+        self._q_getrows_by_prop_str = self._prepQuery(self._t_getrows_by_prop_str)
+        self._q_getrows_by_prop_str_wmin = self._prepQuery(self._t_getrows_by_prop_str_wmin)
+        self._q_getrows_by_prop_str_wmax = self._prepQuery(self._t_getrows_by_prop_str_wmax)
+        self._q_getrows_by_prop_str_wminmax = self._prepQuery(self._t_getrows_by_prop_str_wminmax)
         ###################################################################################
-        self._q_getjoin_by_prop = self._prepQuery(getjoin_by_prop, table)
-        self._q_getjoin_by_prop_wmin = self._prepQuery(getjoin_by_prop_wmin, table)
-        self._q_getjoin_by_prop_wmax = self._prepQuery(getjoin_by_prop_wmax, table)
-        self._q_getjoin_by_prop_wminmax = self._prepQuery(getjoin_by_prop_wminmax, table)
+        self._q_getjoin_by_prop = self._prepQuery(self._t_getjoin_by_prop)
+        self._q_getjoin_by_prop_wmin = self._prepQuery(self._t_getjoin_by_prop_wmin)
+        self._q_getjoin_by_prop_wmax = self._prepQuery(self._t_getjoin_by_prop_wmax)
+        self._q_getjoin_by_prop_wminmax = self._prepQuery(self._t_getjoin_by_prop_wminmax)
         ###################################################################################
-        self._q_getjoin_by_prop_int = self._prepQuery(getjoin_by_prop_int, table)
-        self._q_getjoin_by_prop_int_wmin = self._prepQuery(getjoin_by_prop_int_wmin, table)
-        self._q_getjoin_by_prop_int_wmax = self._prepQuery(getjoin_by_prop_int_wmax, table)
-        self._q_getjoin_by_prop_int_wminmax = self._prepQuery(getjoin_by_prop_int_wminmax, table)
+        self._q_getjoin_by_prop_int = self._prepQuery(self._t_getjoin_by_prop_int)
+        self._q_getjoin_by_prop_int_wmin = self._prepQuery(self._t_getjoin_by_prop_int_wmin)
+        self._q_getjoin_by_prop_int_wmax = self._prepQuery(self._t_getjoin_by_prop_int_wmax)
+        self._q_getjoin_by_prop_int_wminmax = self._prepQuery(self._t_getjoin_by_prop_int_wminmax)
         ###################################################################################
-        self._q_getjoin_by_prop_str = self._prepQuery(getjoin_by_prop_str, table)
-        self._q_getjoin_by_prop_str_wmin = self._prepQuery(getjoin_by_prop_str_wmin, table)
-        self._q_getjoin_by_prop_str_wmax = self._prepQuery(getjoin_by_prop_str_wmax, table)
-        self._q_getjoin_by_prop_str_wminmax = self._prepQuery(getjoin_by_prop_str_wminmax, table)
+        self._q_getjoin_by_prop_str = self._prepQuery(self._t_getjoin_by_prop_str)
+        self._q_getjoin_by_prop_str_wmin = self._prepQuery(self._t_getjoin_by_prop_str_wmin)
+        self._q_getjoin_by_prop_str_wmax = self._prepQuery(self._t_getjoin_by_prop_str_wmax)
+        self._q_getjoin_by_prop_str_wminmax = self._prepQuery(self._t_getjoin_by_prop_str_wminmax)
         ###################################################################################
-        self._q_getsize_by_prop = self._prepQuery(getsize_by_prop, table)
-        self._q_getsize_by_prop_wmin = self._prepQuery(getsize_by_prop_wmin, table)
-        self._q_getsize_by_prop_wmax = self._prepQuery(getsize_by_prop_wmax, table)
-        self._q_getsize_by_prop_wminmax = self._prepQuery(getsize_by_prop_wminmax, table)
+        self._q_getsize_by_prop = self._prepQuery(self._t_getsize_by_prop)
+        self._q_getsize_by_prop_wmin = self._prepQuery(self._t_getsize_by_prop_wmin)
+        self._q_getsize_by_prop_wmax = self._prepQuery(self._t_getsize_by_prop_wmax)
+        self._q_getsize_by_prop_wminmax = self._prepQuery(self._t_getsize_by_prop_wminmax)
         ###################################################################################
-        self._q_getsize_by_prop_int = self._prepQuery(getsize_by_prop_int, table)
-        self._q_getsize_by_prop_int_wmin = self._prepQuery(getsize_by_prop_int_wmin, table)
-        self._q_getsize_by_prop_int_wmax = self._prepQuery(getsize_by_prop_int_wmax, table)
-        self._q_getsize_by_prop_int_wminmax = self._prepQuery(getsize_by_prop_int_wminmax, table)
+        self._q_getsize_by_prop_int = self._prepQuery(self._t_getsize_by_prop_int)
+        self._q_getsize_by_prop_int_wmin = self._prepQuery(self._t_getsize_by_prop_int_wmin)
+        self._q_getsize_by_prop_int_wmax = self._prepQuery(self._t_getsize_by_prop_int_wmax)
+        self._q_getsize_by_prop_int_wminmax = self._prepQuery(self._t_getsize_by_prop_int_wminmax)
         ###################################################################################
-        self._q_getsize_by_prop_str = self._prepQuery(getsize_by_prop_str, table)
-        self._q_getsize_by_prop_str_wmin = self._prepQuery(getsize_by_prop_str_wmin, table)
-        self._q_getsize_by_prop_str_wmax = self._prepQuery(getsize_by_prop_str_wmax, table)
-        self._q_getsize_by_prop_str_wminmax = self._prepQuery(getsize_by_prop_str_wminmax, table)
+        self._q_getsize_by_prop_str = self._prepQuery(self._t_getsize_by_prop_str)
+        self._q_getsize_by_prop_str_wmin = self._prepQuery(self._t_getsize_by_prop_str_wmin)
+        self._q_getsize_by_prop_str_wmax = self._prepQuery(self._t_getsize_by_prop_str_wmax)
+        self._q_getsize_by_prop_str_wminmax = self._prepQuery(self._t_getsize_by_prop_str_wminmax)
         ###################################################################################
 
         self.qbuild = {
@@ -413,102 +422,106 @@ class Cortex(common.Cortex):
                 (str_t,int_t,int_t):self._q_getsize_by_prop_str_wminmax,
             },
             'delrowsbyprop':{
-                (none_t,none_t,none_t):self._prepQuery(delrows_by_prop, table),
-                (none_t,int_t,none_t):self._prepQuery(delrows_by_prop_wmin, table),
-                (none_t,none_t,int_t):self._prepQuery(delrows_by_prop_wmax, table),
-                (none_t,int_t,int_t):self._prepQuery(delrows_by_prop_wminmax, table),
+                (none_t,none_t,none_t):self._prepQuery(self._t_delrows_by_prop),
+                (none_t,int_t,none_t):self._prepQuery(self._t_delrows_by_prop_wmin),
+                (none_t,none_t,int_t):self._prepQuery(self._t_delrows_by_prop_wmax),
+                (none_t,int_t,int_t):self._prepQuery(self._t_delrows_by_prop_wminmax),
 
-                (int_t,none_t,none_t):self._prepQuery(delrows_by_prop_int, table),
-                (int_t,int_t,none_t):self._prepQuery(delrows_by_prop_int_wmin, table),
-                (int_t,none_t,int_t):self._prepQuery(delrows_by_prop_int_wmax, table),
-                (int_t,int_t,int_t):self._prepQuery(delrows_by_prop_int_wminmax, table),
+                (int_t,none_t,none_t):self._prepQuery(self._t_delrows_by_prop_int),
+                (int_t,int_t,none_t):self._prepQuery(self._t_delrows_by_prop_int_wmin),
+                (int_t,none_t,int_t):self._prepQuery(self._t_delrows_by_prop_int_wmax),
+                (int_t,int_t,int_t):self._prepQuery(self._t_delrows_by_prop_int_wminmax),
 
-                (str_t,none_t,none_t):self._prepQuery(delrows_by_prop_str, table),
-                (str_t,int_t,none_t):self._prepQuery(delrows_by_prop_str_wmin, table),
-                (str_t,none_t,int_t):self._prepQuery(delrows_by_prop_str_wmax, table),
-                (str_t,int_t,int_t):self._prepQuery(delrows_by_prop_str_wminmax, table),
+                (str_t,none_t,none_t):self._prepQuery(self._t_delrows_by_prop_str),
+                (str_t,int_t,none_t):self._prepQuery(self._t_delrows_by_prop_str_wmin),
+                (str_t,none_t,int_t):self._prepQuery(self._t_delrows_by_prop_str_wmax),
+                (str_t,int_t,int_t):self._prepQuery(self._t_delrows_by_prop_str_wminmax),
             },
             'deljoinbyprop':{
-                (none_t,none_t,none_t):self._prepQuery(deljoin_by_prop, table),
-                (none_t,int_t,none_t):self._prepQuery(deljoin_by_prop_wmin, table),
-                (none_t,none_t,int_t):self._prepQuery(deljoin_by_prop_wmax, table),
-                (none_t,int_t,int_t):self._prepQuery(deljoin_by_prop_wminmax, table),
+                (none_t,none_t,none_t):self._prepQuery(self._t_deljoin_by_prop),
+                (none_t,int_t,none_t):self._prepQuery(self._t_deljoin_by_prop_wmin),
+                (none_t,none_t,int_t):self._prepQuery(self._t_deljoin_by_prop_wmax),
+                (none_t,int_t,int_t):self._prepQuery(self._t_deljoin_by_prop_wminmax),
 
-                (int_t,none_t,none_t):self._prepQuery(deljoin_by_prop_int, table),
-                (int_t,int_t,none_t):self._prepQuery(deljoin_by_prop_int_wmin, table),
-                (int_t,none_t,int_t):self._prepQuery(deljoin_by_prop_int_wmax, table),
-                (int_t,int_t,int_t):self._prepQuery(deljoin_by_prop_int_wminmax, table),
+                (int_t,none_t,none_t):self._prepQuery(self._t_deljoin_by_prop_int),
+                (int_t,int_t,none_t):self._prepQuery(self._t_deljoin_by_prop_int_wmin),
+                (int_t,none_t,int_t):self._prepQuery(self._t_deljoin_by_prop_int_wmax),
+                (int_t,int_t,int_t):self._prepQuery(self._t_deljoin_by_prop_int_wminmax),
 
-                (str_t,none_t,none_t):self._prepQuery(deljoin_by_prop_str, table),
-                (str_t,int_t,none_t):self._prepQuery(deljoin_by_prop_str_wmin, table),
-                (str_t,none_t,int_t):self._prepQuery(deljoin_by_prop_str_wmax, table),
-                (str_t,int_t,int_t):self._prepQuery(deljoin_by_prop_str_wminmax, table),
+                (str_t,none_t,none_t):self._prepQuery(self._t_deljoin_by_prop_str),
+                (str_t,int_t,none_t):self._prepQuery(self._t_deljoin_by_prop_str_wmin),
+                (str_t,none_t,int_t):self._prepQuery(self._t_deljoin_by_prop_str_wmax),
+                (str_t,int_t,int_t):self._prepQuery(self._t_deljoin_by_prop_str_wminmax),
             }
         }
 
-        self._q_getsize_by_prop = self._prepQuery(getsize_by_prop, table)
+        self._q_getsize_by_prop = self._prepQuery(self._t_getsize_by_prop)
 
-        self._q_getsize_by_ge = self._prepQuery(getsize_by_ge, table)
-        self._q_getsize_by_le = self._prepQuery(getsize_by_le, table)
-        self._q_getsize_by_range = self._prepQuery(getsize_by_range, table)
+        self._q_getsize_by_ge = self._prepQuery(self._t_getsize_by_ge)
+        self._q_getsize_by_le = self._prepQuery(self._t_getsize_by_le)
+        self._q_getsize_by_range = self._prepQuery(self._t_getsize_by_range)
 
-        self._q_delrows_by_id = self._prepQuery(delrows_by_id, table)
-        self._q_delrows_by_id_prop = self._prepQuery(delrows_by_id_prop, table)
+        self._q_delrows_by_iden = self._prepQuery(self._t_delrows_by_iden)
+        self._q_delrows_by_iden_prop = self._prepQuery(self._t_delrows_by_iden_prop)
 
-        self._q_uprows_by_id_prop_str = self._prepQuery(uprows_by_id_prop_str, table)
-        self._q_uprows_by_id_prop_int = self._prepQuery(uprows_by_id_prop_int, table)
+        self._q_uprows_by_iden_prop_str = self._prepQuery(self._t_uprows_by_iden_prop_str)
+        self._q_uprows_by_iden_prop_int = self._prepQuery(self._t_uprows_by_iden_prop_int)
 
-        self._q_getjoin_by_range_str = self._prepQuery(getjoin_by_range_str, table)
-        self._q_getjoin_by_range_int = self._prepQuery(getjoin_by_range_int, table)
+        self._q_getjoin_by_range_str = self._prepQuery(self._t_getjoin_by_range_str)
+        self._q_getjoin_by_range_int = self._prepQuery(self._t_getjoin_by_range_int)
 
     def _checkForTable(self, name):
-        return len(self.select(self._q_istable,(name,)))
+        return len(self.select(self._q_istable, name=name))
 
     def _initCorTable(self, name):
         with self.cursor() as c:
             c.execute(self._q_inittable)
-            c.execute(self._q_init_id_idx)
+            c.execute(self._q_init_iden_idx)
+            c.execute(self._q_init_prop_idx)
             c.execute(self._q_init_strval_idx)
             c.execute(self._q_init_intval_idx)
 
     def _addRows(self, rows):
-        rows = [ (i,p,None,v,t) if s_compat.isint(v) else (i,p,v,None,t) for i,p,v,t in rows ]
-        with self.cursor() as c:
-            c.executemany( self._q_addrows, rows )
+        args = []
+        for i,p,v,t in rows:
+            if s_compat.isint(v):
+                args.append( {'iden':i, 'prop':p, 'intval':v, 'strval':None, 'tstamp':t} )
+            else:
+                args.append( {'iden':i, 'prop':p, 'intval':None, 'strval':v, 'tstamp':t} )
 
-    def update(self, q, r, ret=False):
+        with self.cursor() as c:
+            c.executemany( self._q_addrows, args )
+
+    def update(self, q, **args):
         #print('UPDATE: %r %r' % (q,r))
         with self.cursor() as cur:
-            cur.execute(q,r)
-            if ret:
-                return cur.fetchall()
-
+            cur.execute(q,args)
             return cur.rowcount
 
-    def select(self, q, r):
-        #print('SELECT: %r %r' % (q,r))
+    def select(self, q, **args):
+        #print('SELECT: %r %r' % (q,args))
         with self.cursor() as cur:
-            cur.execute(q,r)
+            cur.execute(q,args)
             return cur.fetchall()
 
-    def delete(self, q, r):
-        #print('DELETE: %s %r' % (q,r))
+    def delete(self, q, **args):
+        #print('DELETE: %s %r' % (q,args))
         with self.cursor() as cur:
-            cur.execute(q,r)
+            cur.execute(q,args)
 
     def _foldTypeCols(self, rows):
         ret = []
-        for ident,prop,intval,strval,stamp in rows:
+        for iden,prop,intval,strval,tstamp in rows:
 
             if intval != None:
-                ret.append( (ident,prop,intval,stamp) )
+                ret.append( (iden,prop,intval,tstamp) )
             else:
-                ret.append( (ident,prop,strval,stamp) )
-                
+                ret.append( (iden,prop,strval,tstamp) )
+
         return ret
 
-    def _getRowsById(self, ident):
-        rows = self.select(self._q_getrows_by_id,(ident,))
+    def _getRowsById(self, iden):
+        rows = self.select(self._q_getrows_by_iden,iden=iden)
         return self._foldTypeCols(rows)
 
     def _getSizeByProp(self, prop, valu=None, limit=None, mintime=None, maxtime=None):
@@ -533,20 +546,18 @@ class Cortex(common.Cortex):
 
         return ret
 
-    def _tufosByRange(self, prop, valus, limit=None):
-        if len(valus) != 2:
-            return []  # TODO: Raise exception?
+    def _tufosByRange(self, prop, valu, limit=None):
+
+        if len(valu) != 2:
+            return []
+
+        minvalu,maxvalu = valu
+        if not s_compat.isint(minvalu) or not s_compat.isint(maxvalu):
+            raise Exception('by "range" requires (int,int)')
 
         limit = self._getDbLimit(limit)
 
-        if s_compat.isint(valus[0]):
-            q = self._q_getjoin_by_range_int
-        else:
-            q = self._q_getjoin_by_range_str
-
-        args = [ prop, valus[0], valus[1], limit ]
-
-        rows = self.select(q,args)
+        rows = self.select(self._q_getjoin_by_range_int, prop=prop, minvalu=minvalu, maxvalu=maxvalu, limit=limit)
         rows = self._foldTypeCols(rows)
         return self._rowsToTufos(rows)
 
@@ -555,44 +566,33 @@ class Cortex(common.Cortex):
 
         qkey = (s_compat.typeof(valu),s_compat.typeof(mintime),s_compat.typeof(maxtime))
 
-        qargs = [ prop ]
-        qargs.extend( [ v for v in (valu,mintime,maxtime) if v != None ] )
-
-        if not nolim:
-            qargs.append(limit)
-
         qstr = self.qbuild[name][qkey]
-        #print('QNAM: %r' % (name,))
-        #print('QKEY: %r' % (qkey,))
-        #print('QSTR: %r' % (qstr,))
-        #print('QARG: %r' % (qargs,))
         if meth == None:
             meth = self.select
 
-        rows = meth(qstr,qargs)
+        rows = meth(qstr, prop=prop, valu=valu, limit=limit, mintime=mintime, maxtime=maxtime)
 
-        #print('QROW: %r' % (rows,))
         return rows
 
-    def _delRowsByIdProp(self, ident, prop):
-        self.delete( self._q_delrows_by_id_prop, (ident,prop))
+    def _delRowsByIdProp(self, iden, prop):
+        self.delete( self._q_delrows_by_iden_prop, iden=iden, prop=prop )
 
     def _getRowsByIdProp(self, iden, prop):
-        rows = self.select( self._q_getrows_by_id_prop, (iden,prop))
+        rows = self.select( self._q_getrows_by_iden_prop, iden=iden, prop=prop)
         return self._foldTypeCols(rows)
 
-    def _setRowsByIdProp(self, ident, prop, valu):
+    def _setRowsByIdProp(self, iden, prop, valu):
         if s_compat.isint(valu):
-            count = self.update( self._q_uprows_by_id_prop_int, (valu,ident,prop) )
+            count = self.update( self._q_uprows_by_iden_prop_int, iden=iden, prop=prop, valu=valu )
         else:
-            count = self.update( self._q_uprows_by_id_prop_str, (valu,ident,prop) )
+            count = self.update( self._q_uprows_by_iden_prop_str, iden=iden, prop=prop, valu=valu )
 
         if count == 0:
-            rows = [ (ident,prop,valu,int(time.time())), ]
+            rows = [ (iden,prop,valu,millinow()), ]
             self._addRows(rows)
 
-    def _delRowsById(self, ident):
-        self.delete(self._q_delrows_by_id,(ident,))
+    def _delRowsById(self, iden):
+        self.delete(self._q_delrows_by_iden, iden=iden)
 
     def _delJoinByProp(self, prop, valu=None, mintime=None, maxtime=None):
         self._runPropQuery('deljoinbyprop',prop,valu=valu,mintime=mintime,maxtime=maxtime,meth=self.delete, nolim=True)
