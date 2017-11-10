@@ -2,7 +2,7 @@ synapse
 =======
 Distributed Key-Value Hypergraph Analysis Framework
 
-|codecov|_ |drone|_ |appveyor|_ |dockerhub|_ |rtd|_
+|codecov|_ |drone|_ |appveyor|_ |dockerhub|_ |rtd|_ |slack|_
 
 Installation
 ------------
@@ -29,3 +29,6 @@ https://vertexprojectsynapse.readthedocs.io
 .. _dockerhub: https://hub.docker.com/r/vertexproject/synapse/
 
 .. _pypi: https://pypi.python.org/pypi/synapse
+
+.. |slack| image:: https://www.vertex.link/badge.svg
+.. _slack: https://www.vertex.link/slack/
