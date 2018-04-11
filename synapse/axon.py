@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 zero64 = b'\x00\x00\x00\x00\x00\x00\x00\x00'
 blocksize = s_const.mebibyte * 64
 
+# TODO
+# 1. Axon figure out clones from neuron list
+# 2. add blob:hash mesg for Blobcell to send hashes for its files
+# 3. Axon keep list of clones and "hash" offset sync per clone of each primary blobstor
+
 class BlobStor(s_eventbus.EventBus):
     '''
     The blob store maps buid,indx values to sequences of bytes stored in a LMDB database.
@@ -47,10 +52,12 @@ class BlobStor(s_eventbus.EventBus):
 
     def save(self, blocs):
         '''
+        Save items from an iterator of (<msgtype>, <msginfo>)
         Save items from an iterator of (<buid><indx>, <byts>).
 
         Args:
             blocs: An iterator of (<buid><indx>, <bytes>).
+            blocs: An iterator of (<msgtype>, <msginfo>).
 
         Notes:
             This API is only for use by a single Axon who owns this BlobStor.
@@ -61,23 +68,31 @@ class BlobStor(s_eventbus.EventBus):
         with self.lenv.begin(write=True, db=self._blob_bytes) as xact:
 
             size = 0
-            count = 0
+            blocct = 0
+            blobct = 0
             clones = []
             tick = s_common.now()
 
-            for lkey, lval in blocs:
-                clones.append(lkey)
-                xact.put(lkey, lval, db=self._blob_bytes)
-
-                size += len(lval)
-                count += 1
+            for mtype, minfo in blocs:
+                if mtype == 'blob':
+                    lkey = minfo['lkey']
+                    xact.put(lkey, minfo['byts'], db=self._blob_bytes)
+                    clones.append(('blob', {'lkey': lkey}))
+                    size += len(minfo['byts'])
+                    blocct += 1
+                if mtype == 'hash':
+                    blobct += 1
+                    clones.append((mtype, minfo))
+                else:
+                    clones.append((mtype, minfo))
 
             self._blob_clone.save(xact, clones)
             self._blob_metrics.inc(xact, 'bytes', size)
-            self._blob_metrics.inc(xact, 'blocks', count)
+            self._blob_metrics.inc(xact, 'blocks', blocct)
+            self._blob_metrics.inc(xact, 'blobs', blobct)
 
             took = s_common.now() - tick
-            self._blob_metrics.record(xact, {'time': tick, 'size': size, 'blocks': count, 'took': took})
+            self._blob_metrics.record(xact, {'time': tick, 'size': size, 'blocks': blocct, 'blobs': blobct, 'took': took})
 
     def load(self, buid):
         '''
@@ -105,18 +120,21 @@ class BlobStor(s_eventbus.EventBus):
     def clone(self, offs):
         '''
         Yield (indx, (lkey, lval)) tuples to clone this BlobStor.
+        Yield (indx, (msg, msginfo)) tuples to clone this BlobStor.
 
         Args:
             offs (int): Offset to start yielding rows from.
 
         Yields:
             ((bytes, (bytes, bytes))): tuples of (index, (<buid><index>,bytes)) data.
+            ((bytes, (bytes, bytes))): tuples of (index, (<msgtype>,<msginfo>)) data.
         '''
         with self.lenv.begin() as xact:
             curs = xact.cursor(db=self._blob_bytes)
-            for indx, lkey in self._blob_clone.iter(xact, offs):
-                byts = curs.get(lkey)
-                yield indx, (lkey, byts)
+            for indx, (mtype, minfo) in self._blob_clone.iter(xact, offs):
+                if mtype == 'blob':
+                    minfo['byts'] = curs.get(minfo['lkey'])
+                yield (indx, (mtype, minfo))
 
     def addCloneRows(self, items):
         '''
@@ -124,6 +142,7 @@ class BlobStor(s_eventbus.EventBus):
 
         Args:
             items (list): A list of tuples containing (index, (<buid><index>,bytes)) data.
+            items (list): A list of tuples containing (index, (<msgtype>, <msginfo>)) data.
 
         Returns:
             int: The last index value processed from the list of items.
@@ -135,9 +154,12 @@ class BlobStor(s_eventbus.EventBus):
         with self.lenv.begin(write=True, db=self._blob_bytes) as xact:
 
             clones = []
-            for indx, (lkey, lval) in items:
-                xact.put(lkey, lval)
-                clones.append(lkey)
+            #for indx, (lkey, lval) in items:
+            for indx, (mtype, minfo) in items:
+                if mtype == 'blob':
+                    xact.put(minfo['lkey'], minfo.pop('byts'))
+
+                clones.append((mtype, minfo))
 
             xact.put(b'clone:indx', struct.pack('>Q', indx), db=self._blob_info)
             self._blob_clone.save(xact, clones)
@@ -197,6 +219,7 @@ class BlobCell(s_cell.Cell):
         if self.cloneof is not None:
             self.cellpool.add(self.cloneof, self._fireCloneThread)
             self.cellinfo['blob:cloneof'] = self.cloneof
+            self.cellinfo['clone:indx'] = self.blobs.getCloneOffs()
 
     def finiCell(self):
         self.blobs.fini()
@@ -228,6 +251,7 @@ class BlobCell(s_cell.Cell):
             try:
 
                 offs = self.blobs.getCloneOffs()
+                self.cellinfo['clone:indx'] = offs
 
                 mesg = ('blob:clone', {'offs': offs})
                 ok, rows = sess.call(mesg, timeout=60)
@@ -247,7 +271,7 @@ class BlobCell(s_cell.Cell):
     def handlers(self):
         self.savedisp = s_net.LinkDisp(self._saveDispItems)
         return {
-            'blob:save': self.savedisp.rx, # ('blob:save', {'rows':[ (lkey, lval)]})
+            'blob:save': self.savedisp.rx, # ('blob:save', {'rows':[ (<msgtype>, <msgdict>)]})
             'blob:load': self._onBlobLoad, # ('blob:load', {'buid': <buid>} )
             'blob:stat': self._onBlobStat, # ('blob:stat', {}) -> (True, {info})
             'blob:clone': self._onBlobClone, # ('blob:clone', {'offs': <indx>}) -> [ (indx, (lkey, lval)), ]
@@ -397,11 +421,13 @@ class AxonCell(s_cell.Cell):
                         lkey = buid + struct.pack('>Q', indx)
                         indx += 1
 
-                        yield lkey, bloc
+                        yield ('blob', {'lkey': lkey, 'byts': bloc})
 
                 if allb or (indx is 0):
                     lkey = buid + struct.pack('>Q', indx)
-                    yield lkey, allb
+                    yield ('blob', {'lkey': lkey, 'byts': allb})
+
+                yield ('hash', {'buid': buid, 'sha256': sha256.digest()})
 
             with sess.chan() as bchan:
 
@@ -575,7 +601,9 @@ class AxonCell(s_cell.Cell):
         for buid, sha256, byts in todo:
             for i, ibyts in enumerate(s_common.chunks(byts, blocksize)):
                 indx = struct.pack('>Q', i)
-                rows.append((buid + indx, ibyts))
+                #rows.append((buid + indx, ibyts, sha256))
+                rows.append(('blob', {'lkey': buid + indx, 'byts': ibyts}))
+            rows.append(('hash', {'buid': buid, 'sha256': sha256}))
 
         ok, retn = self.blobs.any()
         if not ok:

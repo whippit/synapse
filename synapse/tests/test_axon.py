@@ -34,11 +34,14 @@ class AxonTest(SynTest):
             with s_axon.BlobStor(path0) as bst0:
 
                 tbuid = b'\x56' * 32
+                blocs = [b'asdf', b'qwer', b'hehe', b'haha']
+                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
-                    (tbuid + u64(0), b'asdf'),
-                    (tbuid + u64(1), b'qwer'),
-                    (tbuid + u64(2), b'hehe'),
-                    (tbuid + u64(3), b'haha'),
+                    ('blob', {'lkey': tbuid + u64(0), 'byts': blocs[0]}),
+                    ('blob', {'lkey': tbuid + u64(1), 'byts': blocs[1]}),
+                    ('blob', {'lkey': tbuid + u64(2), 'byts': blocs[2]}),
+                    ('blob', {'lkey': tbuid + u64(3), 'byts': blocs[3]}),
+                    ('hash', {'buid': tbuid, 'sha256': sha256}),
                 )
 
                 bst0.save(blobs)
@@ -48,11 +51,14 @@ class AxonTest(SynTest):
 
                 # Order doesn't matter since we're indexed chunks
                 buid2 = b'\x01' * 32
+                blocs = [b'dead', b'b33f', b'f0re', b'sale']
+                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
-                    (buid2 + u64(3), b'sale'),
-                    (buid2 + u64(1), b'b33f'),
-                    (buid2 + u64(0), b'dead'),
-                    (buid2 + u64(2), b'f0re'),
+                    ('blob', {'lkey': buid2 + u64(3), 'byts': blocs[3]}),
+                    ('blob', {'lkey': buid2 + u64(1), 'byts': blocs[1]}),
+                    ('blob', {'lkey': buid2 + u64(0), 'byts': blocs[0]}),
+                    ('blob', {'lkey': buid2 + u64(2), 'byts': blocs[2]}),
+                    ('hash', {'buid': buid2, 'sha256': sha256}),
                 )
 
                 # We do not have bytes for buid2 yet
@@ -67,8 +73,11 @@ class AxonTest(SynTest):
 
                 # We can store and retrieve an empty string
                 buid3 = b'\x02' * 32
+                blocs = [b'']
+                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
-                    (buid3 + u64(0), b''),
+                    ('blob', {'lkey': buid3 + u64(0), 'byts': blocs[0]}),
+                    ('hash', {'buid': buid3, 'sha256': sha256}),
                 )
                 bst0.save(blobs)
                 bl = []
@@ -101,11 +110,15 @@ class AxonTest(SynTest):
             with s_axon.BlobStor(path0) as bst0:
 
                 tbuid = b'\x56' * 32
+
+                blocs = [os.urandom(1000), b'qwer', b'hehe', b'haha']
+                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
-                    (tbuid + u64(0), os.urandom(1000)),
-                    (tbuid + u64(1), b'qwer'),
-                    (tbuid + u64(2), b'hehe'),
-                    (tbuid + u64(3), b'haha'),
+                    ('blob', {'lkey': tbuid + u64(0), 'byts': blocs[0]}),
+                    ('blob', {'lkey': tbuid + u64(1), 'byts': blocs[1]}),
+                    ('blob', {'lkey': tbuid + u64(2), 'byts': blocs[2]}),
+                    ('blob', {'lkey': tbuid + u64(3), 'byts': blocs[3]}),
+                    ('hash', {'buid': tbuid, 'sha256': sha256}),
                 )  # 4 blocks, size 1000 + 4 + 4 + 4 = 1012 bytes
 
                 stats = bst0.stat()
@@ -113,11 +126,11 @@ class AxonTest(SynTest):
 
                 bst0.save(blobs[0:1])
                 stats = bst0.stat()
-                self.eq(stats, {'bytes': 1000, 'blocks': 1})
+                self.eq(stats, {'bytes': 1000, 'blocks': 1, 'blobs': 0})
 
                 bst0.save(blobs[1:])
                 stats = bst0.stat()
-                self.eq(stats, {'bytes': 1012, 'blocks': 4})
+                self.eq(stats, {'bytes': 1012, 'blocks': 4, 'blobs': 1})
 
     def test_axon_blob_metrics(self):
 
@@ -127,11 +140,14 @@ class AxonTest(SynTest):
             with s_axon.BlobStor(path0) as bst0:
 
                 tbuid = b'\x56' * 32
+                blocs = [os.urandom(1000), b'qwer', b'hehe', b'haha']
+                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
-                    (tbuid + u64(0), os.urandom(1000)),
-                    (tbuid + u64(1), b'qwer'),
-                    (tbuid + u64(2), b'hehe'),
-                    (tbuid + u64(3), b'haha'),
+                    ('blob', {'lkey': tbuid + u64(0), 'byts': blocs[0]}),
+                    ('blob', {'lkey': tbuid + u64(1), 'byts': blocs[1]}),
+                    ('blob', {'lkey': tbuid + u64(2), 'byts': blocs[2]}),
+                    ('blob', {'lkey': tbuid + u64(3), 'byts': blocs[3]}),
+                    ('hash', {'buid': tbuid, 'sha256': sha256}),
                 )  # 4 blocks, size 1000 + 4 + 4 + 4 = 1012 bytes
 
                 metrics = sorted(list(bst0.metrics()))
@@ -143,7 +159,7 @@ class AxonTest(SynTest):
                     item[1].pop('time')
                     metrics.append(item[1])
                 tooks = [m.pop('took') for m in metrics]  # remove took since it may vary
-                self.eq(metrics, [{'size': 1000, 'blocks': 1}])
+                self.eq(metrics, [{'size': 1000, 'blocks': 1, 'blobs': 0}])
                 self.len(1, tooks)
                 # These are time based and cannot be promised to be a particular value
                 for took in tooks:
@@ -155,7 +171,7 @@ class AxonTest(SynTest):
                     item[1].pop('time')
                     metrics.append(item[1])
                 tooks = [m.pop('took') for m in metrics]  # remove took since it may vary
-                self.eq(metrics, [{'size': 1000, 'blocks': 1}, {'blocks': 3, 'size': 12}])
+                self.eq(metrics, [{'size': 1000, 'blocks': 1, 'blobs': 0}, {'blocks': 3, 'size': 12, 'blobs': 1}])
                 self.len(2, tooks)
                 # These are time based and cannot be promised to be a particular value
                 for took in tooks:
