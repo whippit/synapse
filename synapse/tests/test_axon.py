@@ -1,30 +1,34 @@
+import os
+import time
 import struct
 
+import synapse.exc as s_exc
 import synapse.axon as s_axon
+import synapse.lib.cell as s_cell
 import synapse.common as s_common
 import synapse.neuron as s_neuron
+import synapse.lib.const as s_const
+import synapse.eventbus as s_eventbus
+import synapse.lib.msgpack as s_msgpack
 
-import synapse.lib.cell as s_cell
-import synapse.lib.crypto.vault as s_vault
+import synapse.tests.common as st_c
 
-from synapse.tests.common import *
-
-logger = logging.getLogger(__name__)
+logger = st_c.logging.getLogger(__name__)
 
 # This causes blocks which are not homogeneous when sliced in kibibyte lengths
 bbuf = b'0123456' * 4585
 
-nullhash = hashlib.sha256(b'').digest()
-bbufhash = hashlib.sha256(bbuf).digest()
-asdfhash = hashlib.sha256(b'asdfasdf').digest()
-hehahash = hashlib.sha256(b'hehehaha').digest()
-ohmyhash = hashlib.sha256(b'ohmyohmy').digest()
-qwerhash = hashlib.sha256(b'qwerqwer').digest()
+nullhash = st_c.hashlib.sha256(b'').digest()
+bbufhash = st_c.hashlib.sha256(bbuf).digest()
+asdfhash = st_c.hashlib.sha256(b'asdfasdf').digest()
+hehahash = st_c.hashlib.sha256(b'hehehaha').digest()
+ohmyhash = st_c.hashlib.sha256(b'ohmyohmy').digest()
+qwerhash = st_c.hashlib.sha256(b'qwerqwer').digest()
 
 def u64(x):
     return struct.pack('>Q', x)
 
-class AxonTest(SynTest):
+class AxonTest(st_c.SynTest):
 
     def test_axon_blob(self):
 
@@ -35,7 +39,7 @@ class AxonTest(SynTest):
 
                 tbuid = b'\x56' * 32
                 blocs = [b'asdf', b'qwer', b'hehe', b'haha']
-                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
+                sha256 = st_c.hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
                     ('blob', {'lkey': tbuid + u64(0), 'byts': blocs[0]}),
                     ('blob', {'lkey': tbuid + u64(1), 'byts': blocs[1]}),
@@ -52,7 +56,7 @@ class AxonTest(SynTest):
                 # Order doesn't matter since we're indexed chunks
                 buid2 = b'\x01' * 32
                 blocs = [b'dead', b'b33f', b'f0re', b'sale']
-                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
+                sha256 = st_c.hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
                     ('blob', {'lkey': buid2 + u64(3), 'byts': blocs[3]}),
                     ('blob', {'lkey': buid2 + u64(1), 'byts': blocs[1]}),
@@ -74,7 +78,7 @@ class AxonTest(SynTest):
                 # We can store and retrieve an empty string
                 buid3 = b'\x02' * 32
                 blocs = [b'']
-                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
+                sha256 = st_c.hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
                     ('blob', {'lkey': buid3 + u64(0), 'byts': blocs[0]}),
                     ('hash', {'buid': buid3, 'sha256': sha256}),
@@ -112,7 +116,7 @@ class AxonTest(SynTest):
                 tbuid = b'\x56' * 32
 
                 blocs = [os.urandom(1000), b'qwer', b'hehe', b'haha']
-                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
+                sha256 = st_c.hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
                     ('blob', {'lkey': tbuid + u64(0), 'byts': blocs[0]}),
                     ('blob', {'lkey': tbuid + u64(1), 'byts': blocs[1]}),
@@ -141,7 +145,7 @@ class AxonTest(SynTest):
 
                 tbuid = b'\x56' * 32
                 blocs = [os.urandom(1000), b'qwer', b'hehe', b'haha']
-                sha256 = hashlib.sha256(b''.join(blocs)).hexdigest()
+                sha256 = st_c.hashlib.sha256(b''.join(blocs)).hexdigest()
                 blobs = (
                     ('blob', {'lkey': tbuid + u64(0), 'byts': blocs[0]}),
                     ('blob', {'lkey': tbuid + u64(1), 'byts': blocs[1]}),
@@ -204,7 +208,7 @@ class AxonTest(SynTest):
                 authblob00 = neur.genCellAuth('blob00')
                 s_msgpack.dumpfile(authblob00, os.path.join(path, 'cell.auth'))
                 logger.debug('Bringing blob00 online')
-                conf = {'host': 'localhost', 'bind': '127.0.0.1'}
+                conf = {'host': 'localhost', 'bind': '127.0.0.1', 'regsec': 1}
                 blob00 = s_axon.BlobCell(path, conf)
                 bref.put('blob00', blob00)
                 self.true(blob00.cellpool.neurwait(timeout=3))
@@ -240,12 +244,14 @@ class AxonTest(SynTest):
                 axonconf = {
                     'host': 'localhost',
                     'bind': '127.0.0.1',
+                    'regsec': 1,
                     'axon:blobs': ('blob00@localhost',),
                 }
                 logger.debug('Bringing axon00 online')
                 axon00 = s_axon.AxonCell(path, axonconf)
                 bref.put('axon00', axon00)
                 self.true(axon00.cellpool.neurwait(timeout=3))
+                axhash00wait = axon00.waiter(1, 'blob:hash:rows')
                 #####################################################
 
                 sess = user.open(axon00.getCellAddr(), timeout=3)
@@ -274,7 +280,7 @@ class AxonTest(SynTest):
                 self.len(1, axon.wants([asdfhash]))
 
                 # Asking for bytes prior to the bytes being present raises
-                self.genraises(RetnErr, axon.bytes, asdfhash, timeout=3)
+                self.genraises(st_c.RetnErr, axon.bytes, asdfhash, timeout=3)
 
                 self.eq(1, axon.save([b'asdfasdf'], timeout=3))
 
@@ -319,6 +325,7 @@ class AxonTest(SynTest):
                 self.nn(blob01wait.wait(timeout=10))
 
                 newp = os.urandom(32)
+
                 def loop():
                     s_common.spin(axon.bytes(newp))
 
@@ -339,7 +346,7 @@ class AxonTest(SynTest):
                 logger.debug('Large file test')
                 # Monkeypatch axon to a smaller blocksize
                 s_axon.blocksize = s_const.kibibyte
-                self.raises(RetnErr, axon.locs, bbufhash, timeout=3)
+                self.raises(st_c.RetnErr, axon.locs, bbufhash, timeout=3)
                 genr = s_common.chunks(bbuf, s_axon.blocksize)
                 # It is possible that we may need multiple events captured
                 # to avoid a timing issue
@@ -350,7 +357,7 @@ class AxonTest(SynTest):
                 # Then retrieve it
                 size = 0
                 gots = []
-                testhash = hashlib.sha256()
+                testhash = st_c.hashlib.sha256()
                 for byts in axon.bytes(bbufhash, timeout=3):
                     size += len(byts)
                     gots.append(byts)
@@ -371,12 +378,14 @@ class AxonTest(SynTest):
 
                 blob01wait.wait(3)
                 self.ne(blob01wait.events, [])
+                self.nn(axhash00wait.wait(10))
                 locs = axon.locs(bbufhash, timeout=3)
-                self.len(1, locs)
+                self.len(2, locs)
+                print('locs:', locs)
                 self.isin('blob00', locs[0][0])
                 # Use the buid to retrieve the large file from blob01
                 tbuid = locs[0][1]
-                testhash = hashlib.sha256()
+                testhash = st_c.hashlib.sha256()
                 for byts in blob01c.bytes(tbuid, timeout=3):
                     testhash.update(byts)
                 self.eq(bbufhash, testhash.digest())
@@ -407,7 +416,7 @@ class AxonTest(SynTest):
                 self.nn(blob01wait.wait(10))
 
                 # Ask a blobclient for data for a random buid
-                newp = buid()
+                newp = st_c.buid()
                 parts = []
                 for part in blob.bytes(newp):
                     parts.append(part)
@@ -455,6 +464,7 @@ class AxonTest(SynTest):
                 axon00 = s_axon.AxonCell(path, axonconf)
                 bref.put('axon00', axon00)
                 self.true(axon00.cellpool.neurwait(timeout=3))
+                hash01wait = axon00.waiter(1, 'blob:hash:rows')
                 #####################################################
                 sess = user.open(axon00.getCellAddr(), timeout=3)
                 bref.put('sess', sess)
@@ -469,7 +479,7 @@ class AxonTest(SynTest):
                 axon = s_axon.AxonClient(sess)
 
                 # Try retrieving a large file
-                testhash = hashlib.sha256()
+                testhash = st_c.hashlib.sha256()
                 for byts in axon.bytes(bbufhash, timeout=3):
                     testhash.update(byts)
                 self.eq(bbufhash, testhash.digest())
@@ -478,3 +488,12 @@ class AxonTest(SynTest):
                 self.eq((ohmyhash,), axon.wants((ohmyhash, hehahash, nullhash), 3))
                 self.eq(1, axon.save([b'ohmyohmyy', b'']))
                 self.nn(blob01wait.wait(10))
+
+                # Make sure clone hashes come through
+                self.nn(hash01wait.wait(10))
+
+                locs = axon.locs(bbufhash, timeout=3)
+                self.len(2, locs)
+                lnames = [name for name, sha in locs]
+                self.isin('blob00@localhost', lnames)
+                self.isin('blob01@localhost', lnames)

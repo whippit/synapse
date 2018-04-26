@@ -113,6 +113,7 @@ class Cell(s_config.Configable, s_net.Link, SessBoss):
 
         addr = self.getConfOpt('bind')
         port = self.getConfOpt('port')
+        self.regsec = self.getConfOpt('regsec')
 
         def onlink(link):
             sess = CellSess(link, self)
@@ -162,7 +163,8 @@ class Cell(s_config.Configable, s_net.Link, SessBoss):
 
             # either way, try again soon...
             if not sess.isfini:
-                s_glob.sched.insec(60, cellreg)
+                s_glob.sched.insec(self.regsec, cellreg)
+                self.fire('neur:reg', ok=ok)
 
         def cellreg():
 
@@ -337,15 +339,23 @@ class Cell(s_config.Configable, s_net.Link, SessBoss):
                 'ex': 'synapse.cells.axon',
                 'doc': 'The path to the cell constructor'}),
 
-            ('bind', {'defval': '0.0.0.0', 'req': 1,
+            ('bind', {
+                'defval': '0.0.0.0',
+                'req': 1,
                 'doc': 'The IP address to bind'}),
 
-            ('host', {'defval': socket.gethostname(),
+            ('host', {
+                'defval': socket.gethostname(),
                 'ex': 'cell.vertex.link',
                 'doc': 'The host name used to connect to this cell. This should resolve over DNS. Defaults to the result of socket.gethostname().'}),
 
-            ('port', {'defval': 0,
+            ('port', {
+                'defval': 0,
                 'doc': 'The TCP port the Cell binds to (defaults to dynamic)'}),
+
+            ('regsec', {
+                'defval': 60,
+                'doc': 'The interval (in seconds) that the cell re-registers with the neuron'}),
         ))
 
 class Sess(s_net.Link):

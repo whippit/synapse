@@ -6,6 +6,7 @@ import hashlib
 import itertools
 
 import synapse.glob as s_glob
+import synapse.neuron as s_neur
 import synapse.common as s_common
 import synapse.eventbus as s_eventbus
 
@@ -21,9 +22,7 @@ zero64 = b'\x00\x00\x00\x00\x00\x00\x00\x00'
 blocksize = s_const.mebibyte * 64
 
 # TODO
-# 1. Axon figure out clones from neuron list
-# 2. add blob:hash mesg for Blobcell to send hashes for its files
-# 3. Axon keep list of clones and "hash" offset sync per clone of each primary blobstor
+# 1. how does axon assimilate a new blobstore that *isn't* empty
 
 class BlobStor(s_eventbus.EventBus):
     '''
@@ -92,7 +91,13 @@ class BlobStor(s_eventbus.EventBus):
             self._blob_metrics.inc(xact, 'blobs', blobct)
 
             took = s_common.now() - tick
-            self._blob_metrics.record(xact, {'time': tick, 'size': size, 'blocks': blocct, 'blobs': blobct, 'took': took})
+            self._blob_metrics.record(xact, {
+                'time': tick,
+                'size': size,
+                'blocks': blocct,
+                'blobs': blobct,
+                'took': took
+            })
 
     def load(self, buid):
         '''
@@ -127,13 +132,29 @@ class BlobStor(s_eventbus.EventBus):
 
         Yields:
             ((bytes, (bytes, bytes))): tuples of (index, (<buid><index>,bytes)) data.
-            ((bytes, (bytes, bytes))): tuples of (index, (<msgtype>,<msginfo>)) data.
+            ((int, (str, dict))): tuples of (index, (<msgtype>,<msginfo>)) data.
         '''
         with self.lenv.begin() as xact:
             curs = xact.cursor(db=self._blob_bytes)
             for indx, (mtype, minfo) in self._blob_clone.iter(xact, offs):
                 if mtype == 'blob':
                     minfo['byts'] = curs.get(minfo['lkey'])
+                yield (indx, (mtype, minfo))
+
+    def hashes(self, offs):
+        '''
+        Yield (indx, (msg, msginfo)) tuples to provide the buid/hash maps for this BlobStor.
+
+        Args:
+            offs (int): Offset to start yielding rows from.
+
+        Yields:
+            ((int, (str, dict))): tuples of (index, (<msgtype>,<msginfo>)) data.
+        '''
+        with self.lenv.begin() as xact:
+            for indx, (mtype, minfo) in self._blob_clone.iter(xact, offs):
+                if mtype != 'hash':
+                    continue
                 yield (indx, (mtype, minfo))
 
     def addCloneRows(self, items):
@@ -275,6 +296,7 @@ class BlobCell(s_cell.Cell):
             'blob:load': self._onBlobLoad, # ('blob:load', {'buid': <buid>} )
             'blob:stat': self._onBlobStat, # ('blob:stat', {}) -> (True, {info})
             'blob:clone': self._onBlobClone, # ('blob:clone', {'offs': <indx>}) -> [ (indx, (lkey, lval)), ]
+            'blob:hash': self._onBlobHash, # ('blob:hash', {'offs': <indx>}) -> [ (indx, ('hash', <hashdict>)]})
             'blob:upload': self._onBlobUpload,
             'blob:metrics': self._onBlobMetrics, # ('metrics', {'offs':<indx>}) -> ( (indx, info), ... )
         }
@@ -284,6 +306,14 @@ class BlobCell(s_cell.Cell):
         with chan:
             offs = mesg[1].get('offs')
             genr = self.blobs.clone(offs)
+            rows = list(itertools.islice(genr, 1000))
+            chan.txok(rows)
+
+    @s_glob.inpool
+    def _onBlobHash(self, chan, mesg):
+        with chan:
+            offs = mesg[1].get('offs')
+            genr = self.blobs.hashes(offs)
             rows = list(itertools.islice(genr, 1000))
             chan.txok(rows)
 
@@ -334,10 +364,12 @@ class BlobCell(s_cell.Cell):
     @s_config.confdef(name='blob')
     def _getBlobConfDefs():
         return (
-            ('blob:mapsize', {'type': 'int', 'defval': s_const.tebibyte * 10,
+            ('blob:mapsize', {
+                'type': 'int', 'defval': s_const.tebibyte * 10,
                 'doc': 'The maximum size of the LMDB memory map'}),
 
-            ('blob:cloneof', {'defval': None,
+            ('blob:cloneof', {
+                'defval': None,
                 'doc': 'The name of a blob cell to clone from'}),
         )
 
@@ -368,10 +400,67 @@ class AxonCell(s_cell.Cell):
         for name in self.getConfOpt('axon:blobs'):
             self.blobs.add(name)
 
+        self.clones = s_cell.CellPool(self.cellauth, self.neuraddr)
+        self.clones.neurwait(timeout=10)
+
+        self.hashoffs = self.kvstor.getKvDict('hash:offsets')
+
+        self.listCells()
+
+    def listCells(self):
+        nc = s_neur.NeuronClient(self.clones.neur)
+
+        for name, info in nc.listCells():
+            if info.get('blob:cloneof') is None:
+                continue
+
+            if self.clones.get(name):
+                continue
+
+            def onsess(sess, name=name):
+                self._fireHashThread(name, sess)
+
+            self.clones.add(name, onsess)
+
+        if not self.isfini:
+            s_glob.sched.insec(self.regsec, self.listCells)
+
     def finiCell(self):
         self.lenv.sync()
         self.lenv.close()
         self.blobs.fini()
+        self.clones.fini()
+
+    @s_common.firethread
+    def _fireHashThread(self, name, sess):
+        '''
+        Fires a thread which requests hash rows from a given offset
+        for the remote blob.
+        '''
+        print('fHT1: %r' % (name,))
+        while not sess.isfini:
+            time.sleep(1)
+            try:
+
+                offs = self.hashoffs.get(name, 0)
+
+                mesg = ('blob:hash', {'offs': offs})
+                ok, rows = sess.call(mesg, timeout=60)
+
+                if not ok or not rows:
+                    sess.waitfini(timeout=1)
+                    continue
+
+                with self.lenv.begin(write=True) as xact:
+                    for indx, (mtype, minfo) in rows:
+                        self._addFileLoc(xact, minfo['buid'], minfo['sha256'], minfo['size'], name)
+
+                self.fire('blob:hash:rows', size=len(rows))
+
+            except Exception as e:
+                if not sess.isfini:
+                    logger.exception('Hash clone thread error')
+                    time.sleep(1)
 
     def handlers(self):
         return {
@@ -427,7 +516,7 @@ class AxonCell(s_cell.Cell):
                     lkey = buid + struct.pack('>Q', indx)
                     yield ('blob', {'lkey': lkey, 'byts': allb})
 
-                yield ('hash', {'buid': buid, 'sha256': sha256.digest()})
+                yield ('hash', {'buid': buid, 'sha256': sha256.digest(), 'size': info['size']})
 
             with sess.chan() as bchan:
 
@@ -551,6 +640,30 @@ class AxonCell(s_cell.Cell):
 
                 chan.txwind(genr(), 10, timeout=30)
 
+    def addHashRows(self, items):
+        '''
+        Add rows from obtained from a BlobStor.hashes() method.
+
+        Args:
+            items (list): A list of tuples containing (index, (<msgtype>, <msginfo>)) data.
+
+        Returns:
+            int: The last index value processed from the list of items.
+        '''
+
+        if not items:
+            return
+
+        with self.lenv.begin(write=True, db=self._bloblocs) as xact:
+
+            clones = []
+            for indx, (mtype, minfo) in items:
+                if mtype != 'hash':
+                    continue
+
+                self._addFileLoc(xact, minfo['buid'], minfo['sha256'], size, name)
+            return indx
+
     def getBlobLocs(self, xact, sha256):
         '''
         Get the blob and buids for a given sha256 value
@@ -599,11 +712,12 @@ class AxonCell(s_cell.Cell):
 
         rows = []
         for buid, sha256, byts in todo:
+            size = 0
             for i, ibyts in enumerate(s_common.chunks(byts, blocksize)):
                 indx = struct.pack('>Q', i)
-                #rows.append((buid + indx, ibyts, sha256))
+                size += len(ibyts)
                 rows.append(('blob', {'lkey': buid + indx, 'byts': ibyts}))
-            rows.append(('hash', {'buid': buid, 'sha256': sha256}))
+            rows.append(('hash', {'buid': buid, 'sha256': sha256, 'size': size}))
 
         ok, retn = self.blobs.any()
         if not ok:
@@ -650,10 +764,13 @@ class AxonCell(s_cell.Cell):
     @s_config.confdef(name='axon')
     def _getAxonConfDefs():
         return (
-            ('axon:mapsize', {'type': 'int', 'defval': s_const.tebibyte,
+            ('axon:mapsize', {
+                'type': 'int',
+                'defval': s_const.tebibyte,
                 'doc': 'The maximum size of the LMDB memory map'}),
 
-            ('axon:blobs', {'req': True,
+            ('axon:blobs', {
+                'req': True,
                 'doc': 'A list of cell names in a neuron cluster'}),
         )
 

@@ -111,7 +111,9 @@ class Neuron(s_cell.Cell):
     def initConfDefs(self):
         s_cell.Cell.initConfDefs(self)
         self.addConfDefs((
-            ('port', {'defval': defport, 'req': 1,
+            ('port', {
+                'defval': defport,
+                'req': 1,
                 'doc': 'The TCP port the Neuron binds to (defaults to %d)' % defport}),
         ))
 
@@ -125,5 +127,13 @@ class NeuronClient:
         Generate a new cell auth file.
         '''
         mesg = ('cell:init', {'name': name})
+        ok, retn = self.sess.call(mesg, timeout=timeout)
+        return s_common.reqok(ok, retn)
+
+    def listCells(self, timeout=None):
+        '''
+        List registered cells.
+        '''
+        mesg = ('cell:list', {})
         ok, retn = self.sess.call(mesg, timeout=timeout)
         return s_common.reqok(ok, retn)
